@@ -65,6 +65,48 @@ cd ~/caddy-proxy && docker compose up -d
 
 If the user already has this running, skip it.
 
+## MANDATORY: Dependency Audit Before Containerization
+
+**Do NOT start writing docker-compose.yml until you complete this audit.** Surface-level config reading (ports, env vars) is insufficient. You must trace the full runtime dependency graph.
+
+### Step 1: Identify all services in the project
+
+Read the project's entry points, scripts, and package structure. For each runnable service, determine:
+- What it does (API server, web UI, background worker, native app)
+- Whether it belongs in Docker or runs natively on the host (e.g. Tauri/Electron apps are native)
+- Which services need caddy routing (browser-facing UIs) vs direct port binding (API backends that clients hit on localhost)
+
+### Step 2: Trace imports from every entry point
+
+For each service being containerized, start at the entry point and follow ALL imports recursively. Search for:
+
+```bash
+rg 'execSync|spawn|child_process' packages/         # system binary deps
+rg 'WebSocket|ws:|upgrade' packages/                  # WebSocket requirements
+rg 'import\.meta\.url|__dirname.*data|writeFile' packages/  # filesystem paths
+rg 'process\.env\.' packages/                          # environment variables
+```
+
+### Step 3: Audit filesystem paths
+
+Code that derives paths from `import.meta.url` or `__dirname` will resolve to container-internal paths that don't map to Docker volumes. For every data directory:
+- Identify if it's hardcoded or configurable via env var
+- If hardcoded, add a symlink in the Dockerfile pointing to the volume mount
+- If configurable, set the env var in docker-compose.yml
+
+### Step 4: Check for workspace monorepo issues
+
+For monorepo projects where a containerized service imports from sibling workspace packages:
+- The Dockerfile must copy ALL workspace package.json files (not just the ones for the target service) so the lockfile stays consistent
+- Named volumes overlaying `node_modules` break workspace symlinks in some package managers — test this before relying on it
+- bun auto-enables `--frozen-lockfile` in Docker (CI detection); use `bun install` without `--production` or set env vars to disable
+
+### Step 5: Determine what goes through caddy vs what gets host ports
+
+- Browser-facing UIs → caddy labels + `expose` (no `ports`)
+- API backends that external tools hit on localhost → `ports: ["HOST:CONTAINER"]` (no caddy)
+- Internal-only services (databases, queues) → neither; use Docker network DNS
+
 ## Per-Project Setup
 
 Add convenience scripts to the project's `package.json` so developers run simple commands, not raw Docker:
@@ -107,6 +149,8 @@ volumes:
 The pattern: mount the source code with `.:/app`, then overlay `node_modules` with a named volume. The startup command checks if deps exist before installing. Second startup is instant.
 
 `docker compose down` preserves the volume. Only `docker compose down -v` deletes it (and forces a reinstall).
+
+**Monorepo caveat:** Named volumes on `node_modules` can break workspace package symlinks (e.g. `@myorg/shared` → `../../packages/shared`). The volume hides the host's node_modules, and some package managers don't recreate workspace links correctly inside the volume. If workspace imports fail, drop the named volume and bind-mount the whole workspace including node_modules. This works when the dependency tree has no platform-specific native modules (all JS/WASM). If native modules exist, use a multi-stage Dockerfile instead of bind mounts for that service.
 
 ### Join the caddy network
 
@@ -223,6 +267,55 @@ services:
       caddy.reverse_proxy: "{{upstreams 8080}}"
 ```
 
+### Every Service Goes Through Caddy
+
+**Do NOT use `ports` to expose services on the host.** That reintroduces the port conflict problem this entire setup exists to solve. Every service — frontends, API backends, proxies — gets its own `*.localhost` subdomain through caddy.
+
+```yaml
+services:
+  api:
+    build: .
+    expose:
+      - "8080"
+    networks: [default, caddy]
+    labels:
+      caddy: "http://api-${COMPOSE_PROJECT_NAME}.localhost"
+      caddy.reverse_proxy: "{{upstreams 8080}}"
+```
+
+CLI tools, SDKs, and AI clients point to `http://api-myproject.localhost` instead of `localhost:PORT`. No conflicts, no port juggling, deterministic URLs.
+
+### Native Apps (Tauri, Electron)
+
+Desktop apps that use system tray, spawn processes, or access host hardware cannot run in Docker. Add a script to start them alongside the Docker services:
+
+```json
+{
+  "scripts": {
+    "up": "docker compose up -d && echo '  ⇒ http://myapp.localhost'",
+    "tauri": "cd packages/app && bun run dev"
+  }
+}
+```
+
+If the native app manages a backend service (start/stop/monitor), ensure the Docker-managed version is accessible on the same port the native app expects (usually `localhost:PORT`).
+
+### Filesystem Path Gotcha in Docker
+
+Code that derives data paths from `import.meta.url` or `__dirname` resolves to paths inside the container image, NOT the Docker volume. Example:
+
+```ts
+const DATA_DIR = join(fileURLToPath(new URL("..", import.meta.url)), "data");
+```
+
+This resolves to `/app/packages/myservice/data` inside the container, which is ephemeral. Fix with a symlink in the Dockerfile:
+
+```dockerfile
+RUN mkdir -p /data && ln -s /data /app/packages/myservice/data
+```
+
+Or add an env var override for the data directory.
+
 ## Troubleshooting
 
 | Problem | Fix |
@@ -232,6 +325,9 @@ services:
 | Container not found | Service not on `caddy` network — add `networks: [default, caddy]` |
 | Wrong project routes | `COMPOSE_PROJECT_NAME` defaults to directory name; set explicitly in `.env` if needed |
 | Port conflict on :80 | Another process using port 80 — stop it or change the proxy port |
+| bun frozen lockfile in Docker | bun auto-enables frozen lockfile with `--production` and in CI-detected environments (Docker). Pin bun version to match local, copy ALL workspace package.jsons, avoid `--production` |
+| Workspace imports fail in container | Named volume on node_modules breaks workspace symlinks. Drop the named volume and bind-mount the whole workspace |
+| Data lost on container restart | Check if code uses `import.meta.url`/`__dirname` for data paths — these resolve inside the image, not to volumes. Add symlinks or env var overrides |
 
 ## Verification
 
