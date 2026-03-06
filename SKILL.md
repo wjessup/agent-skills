@@ -72,13 +72,15 @@ Add convenience scripts to the project's `package.json` so developers run simple
 ```json
 {
   "scripts": {
-    "up": "docker compose up -d",
+    "up": "docker compose up -d && echo '' && echo '  ⇒ http://'$(basename $(pwd))'.localhost' && echo ''",
     "down": "docker compose down",
     "logs": "docker compose logs -f",
-    "restart": "docker compose down && docker compose up -d"
+    "restart": "docker compose down && docker compose up -d && echo '' && echo '  ⇒ http://'$(basename $(pwd))'.localhost' && echo ''"
   }
 }
 ```
+
+The `up` script prints the project URL after starting. `basename $(pwd)` matches the `COMPOSE_PROJECT_NAME` default (the directory name), so the URL is always correct.
 
 This gives `npm run up` / `bun run up` / `yarn up` etc. Always add these — never tell users to run `docker compose` directly.
 
