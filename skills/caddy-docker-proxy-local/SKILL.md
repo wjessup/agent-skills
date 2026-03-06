@@ -5,7 +5,15 @@ description: Set up local development with caddy-docker-proxy for automatic *.lo
 
 # Caddy Docker Proxy — Local Dev Setup
 
-Uses [lucaslorentz/caddy-docker-proxy](https://github.com/lucaslorentz/caddy-docker-proxy) to give any Docker Compose project a clean `http://<project>.localhost` URL with automatic routing via Docker labels. No Caddyfile needed.
+## Why This Exists
+
+When AI agents control your dev environment, you lose track of what's running where. An agent starts `npm run dev` on port 3000 in one terminal. You open a second project — another agent grabs port 3000, fails, falls back to 3001. A third project takes 3002. Now you have three apps on random ports across terminals you didn't open, and nobody knows which URL belongs to which project.
+
+This gets worse with fullstack apps. Frontend, API, database — that's 3+ ports per project. Four projects? You're juggling 12 port assignments that change every time something restarts.
+
+**The fix:** move everything into Docker and put a shared reverse proxy in front. Each project gets a stable, deterministic URL like `http://my-project.localhost`. No port conflicts. No guessing. Multiple projects run simultaneously because the proxy routes by hostname, not port number.
+
+Uses [lucaslorentz/caddy-docker-proxy](https://github.com/lucaslorentz/caddy-docker-proxy) for automatic routing via Docker labels. No Caddyfile needed.
 
 ## Architecture
 
