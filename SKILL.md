@@ -15,6 +15,8 @@ This gets worse with fullstack apps. Frontend, API, database — that's 3+ ports
 
 Uses [lucaslorentz/caddy-docker-proxy](https://github.com/lucaslorentz/caddy-docker-proxy) for automatic routing via Docker labels. No Caddyfile needed.
 
+**This is a local dev setup only.** Do not push images to Docker Hub, GitHub Container Registry, or any remote registry. Do not suggest remote caching. Everything runs locally.
+
 ## Architecture
 
 ```
@@ -80,7 +82,31 @@ Add convenience scripts to the project's `package.json` so developers run simple
 
 This gives `npm run up` / `bun run up` / `yarn up` etc. Always add these — never tell users to run `docker compose` directly.
 
-Then add three things to `docker-compose.yml`:
+Then set up `docker-compose.yml` with the following.
+
+### Dependency Caching with Named Volumes
+
+For projects with `node_modules` (or similar dependency directories), use named volumes so dependencies persist across restarts. This avoids reinstalling on every `docker compose up`.
+
+```yaml
+services:
+  web:
+    image: node:22
+    working_dir: /app
+    command: ["sh", "-c", "[ -d node_modules ] || npm install; exec npm run dev"]
+    volumes:
+      - .:/app
+      - web_node_modules:/app/node_modules
+
+volumes:
+  web_node_modules:
+```
+
+The pattern: mount the source code with `.:/app`, then overlay `node_modules` with a named volume. The startup command checks if deps exist before installing. Second startup is instant.
+
+`docker compose down` preserves the volume. Only `docker compose down -v` deletes it (and forces a reinstall).
+
+### Join the caddy network
 
 ### 1. Join the caddy network
 
